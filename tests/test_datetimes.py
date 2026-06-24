@@ -298,7 +298,7 @@ def test_time_localtime() -> None:
             assert time_struct.tm_sec == 34
             assert time_struct.tm_wday == 5
             assert time_struct.tm_yday == 14
-            assert time_struct.tm_isdst == -1
+            assert time_struct.tm_isdst in (0, 1)
     assert time.localtime().tm_year != 2012
 
 

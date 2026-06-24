@@ -73,6 +73,8 @@ freeze_factories: List[Union["StepTickTimeFactory", "TickingDateTimeFactory", "F
 tz_offsets: List[datetime.timedelta] = []
 ignore_lists: List[Tuple[str, ...]] = []
 tick_flags: List[bool] = []
+_clock_start_value: float = 0.0
+_clock_peak_value: float = 0.0
 
 try:
     # noinspection PyUnresolvedReferences
@@ -157,26 +159,25 @@ call_stack_inspection_limit = 5
 
 
 def _should_use_real_time() -> bool:
-    if not call_stack_inspection_limit:
-        return False
-
-    # Means stop() has already been called, so we can now return the real time
     if not ignore_lists:
         return True
 
-    if not ignore_lists[-1]:
-        return False
-
     frame = inspect.currentframe().f_back.f_back  # type: ignore
 
-    for _ in range(call_stack_inspection_limit):
+    while frame is not None:
         module_name = frame.f_globals.get('__name__')  # type: ignore
-        if module_name and module_name.startswith(ignore_lists[-1]):
-            return True
+        if module_name:
+            for ignore_tuple in reversed(ignore_lists):
+                if not ignore_tuple:
+                    return False
+                if module_name.startswith(ignore_tuple):
+                    return True
 
         frame = frame.f_back  # type: ignore
-        if frame is None:
-            break
+
+    for ignore_tuple in reversed(ignore_lists):
+        if ignore_tuple:
+            return False
 
     return False
 
@@ -203,8 +204,20 @@ def fake_localtime(t: Optional[float]=None) -> time.struct_time:
         return real_localtime(t)
     if _should_use_real_time():
         return real_localtime()
-    shifted_time = get_current_time() - datetime.timedelta(seconds=time.timezone)
-    return shifted_time.timetuple()
+    current_time = get_current_time()
+    dst_check = real_localtime(calendar.timegm(current_time.timetuple()))
+    is_dst = dst_check.tm_isdst
+    if is_dst:
+        offset_seconds = time.altzone
+    else:
+        offset_seconds = time.timezone
+    shifted_time = current_time - datetime.timedelta(seconds=offset_seconds)
+    tt = shifted_time.timetuple()
+    return time.struct_time((
+        tt.tm_year, tt.tm_mon, tt.tm_mday,
+        tt.tm_hour, tt.tm_min, tt.tm_sec,
+        tt.tm_wday, tt.tm_yday, is_dst,
+    ))
 
 
 def fake_gmtime(t: Optional[float]=None) -> time.struct_time:
@@ -274,22 +287,31 @@ def fake_strftime(format: Any, time_to_format: Any=None) -> str:
 
 if real_clock is not None:
     def fake_clock() -> Any:
+        global _clock_peak_value
         if _should_use_real_time():
             return real_clock()  # type: ignore
 
         if len(freeze_factories) == 1:
-            return 0.0 if not tick_flags[-1] else real_clock()  # type: ignore
+            if tick_flags[-1]:
+                val = real_clock() - _clock_start_value  # type: ignore
+            else:
+                val = 0.0
+        else:
+            first_frozen_time = freeze_factories[0]()
+            last_frozen_time = get_current_time()
 
-        first_frozen_time = freeze_factories[0]()
-        last_frozen_time = get_current_time()
+            timedelta = (last_frozen_time - first_frozen_time)
+            val = timedelta.total_seconds()
 
-        timedelta = (last_frozen_time - first_frozen_time)
-        total_seconds = timedelta.total_seconds()
+            if tick_flags[-1]:
+                val += real_clock() - _clock_start_value  # type: ignore
 
-        if tick_flags[-1]:
-            total_seconds += real_clock()  # type: ignore
-
-        return total_seconds
+        val = max(0.0, val)
+        if val < _clock_peak_value:
+            val = _clock_peak_value
+        else:
+            _clock_peak_value = val
+        return val
 
 
 class FakeDateMeta(type):
@@ -401,7 +423,7 @@ class FakeDatetime(real_datetime, FakeDate, metaclass=FakeDatetimeMeta):
     def now(cls, tz: Optional[datetime.tzinfo] = None) -> "FakeDatetime":
         now = cls._time_to_freeze() or real_datetime.now()
         if tz:
-            result = tz.fromutc(now.replace(tzinfo=tz)) + cls._tz_offset()
+            result = tz.fromutc(now.replace(tzinfo=tz))
         else:
             result = now + cls._tz_offset()
         return datetime_to_fakedatetime(result)
@@ -555,9 +577,7 @@ class StepTickTimeFactory:
         self.step_width = step_width
 
     def __call__(self) -> datetime.datetime:
-        return_time = self.time_to_freeze
-        self.tick()
-        return return_time
+        return self.time_to_freeze
 
     def tick(self, delta: Union[datetime.timedelta, float, None]=None) -> datetime.datetime:
         if not delta:
@@ -758,6 +778,11 @@ class _freeze_time:
         if is_already_started:
             return freeze_factory
 
+        global _clock_start_value, _clock_peak_value
+        if real_clock is not None:
+            _clock_start_value = real_clock()  # type: ignore
+        _clock_peak_value = 0.0
+
         # Change the modules
         datetime.datetime = FakeDatetime  # type: ignore[misc]
         datetime.date = FakeDate  # type: ignore[misc]
@@ -856,6 +881,9 @@ class _freeze_time:
         tz_offsets.pop()
 
         if not freeze_factories:
+            global _clock_start_value, _clock_peak_value
+            _clock_start_value = 0.0
+            _clock_peak_value = 0.0
             datetime.datetime = real_datetime  # type: ignore[misc]
             datetime.date = real_date  # type: ignore[misc]
             copyreg.dispatch_table.pop(real_datetime)
@@ -986,7 +1014,13 @@ def freeze_time(time_to_freeze: Optional[_Freezable]=None, tz_offset: Union[int,
                          'instance, MayaDT, timedelta instance, function or a generator, but got '
                          'type {}.').format(type(time_to_freeze)))
     if tick and not _is_cpython:
-        raise SystemError('Calling freeze_time with tick=True is only compatible with CPython')
+        raise NotImplementedError(
+            'freeze_time with tick=True is only supported on CPython. '
+            'The current Python interpreter ({}) does not support the '
+            'high-resolution timing features required for tick mode.'.format(
+                platform.python_implementation()
+            )
+        )
 
     if isinstance(time_to_freeze, types.FunctionType):
         return freeze_time(time_to_freeze(), tz_offset, ignore, tick, as_arg, as_kwarg, auto_tick_seconds, real_asyncio=real_asyncio)

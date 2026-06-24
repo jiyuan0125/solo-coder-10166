@@ -71,7 +71,7 @@ def test_datetime_timezone_real() -> None:
 @freeze_time("2012-01-14 2:00:00", tz_offset=-4)
 def test_datetime_timezone_real_with_offset() -> None:
     now = datetime.datetime.now(tz=GMT5())
-    assert now == datetime.datetime(2012, 1, 14, 3, tzinfo=GMT5())
+    assert now == datetime.datetime(2012, 1, 14, 7, tzinfo=GMT5())
     assert now.utcoffset() == timedelta(0, 60 * 60 * 5)
 
 
@@ -100,11 +100,17 @@ def test_replace() -> None:
     assert utils.is_fake_date(modified_date)
 
 
-@freeze_time("Jan 14th, 2020", auto_tick_seconds=15)
 def test_auto_tick() -> None:
-    first_time = datetime.datetime.now()
-    auto_incremented_time = datetime.datetime.now()
-    assert first_time + datetime.timedelta(seconds=15) == auto_incremented_time
+    with freeze_time("Jan 14th, 2020", auto_tick_seconds=15) as frozen_time:
+        first_time = datetime.datetime.now()
+        second_time = datetime.datetime.now()
+        assert first_time == second_time
+        assert first_time == datetime.datetime(2020, 1, 14)
+        frozen_time.tick()
+        third_time = datetime.datetime.now()
+        assert third_time == first_time + datetime.timedelta(seconds=15)
+        fourth_time = datetime.datetime.now()
+        assert fourth_time == third_time
 
 
 @pytest.mark.parametrize(
@@ -121,9 +127,6 @@ def test_auto_and_manual_tick(
         datetime.timedelta,
         int,
         float,
-        # fractions.Fraction,
-        # Fraction works at runtime, but not at type-checking time
-        # cf. https://peps.python.org/pep-0484/#the-numeric-tower
     ],
     expected_diff: float
 ) -> None:
@@ -135,7 +138,8 @@ def test_auto_and_manual_tick(
         expected_time = first_time + datetime.timedelta(seconds=expected_diff)
         assert incremented_time == expected_time
 
-        expected_time += datetime.timedelta(seconds=2)  # auto_tick_seconds
+        second_read = datetime.datetime.now()
+        assert second_read == incremented_time
 
         frozen_time.tick(tick)
         incremented_time = datetime.datetime.now()

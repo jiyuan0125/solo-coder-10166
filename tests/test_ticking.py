@@ -113,7 +113,7 @@ def test_ticking_monotonic(func_name: str) -> None:
 def test_pypy_compat() -> None:
     try:
         freeze_time("Jan 14th, 2012, 23:59:59", tick=True)
-    except SystemError:
+    except NotImplementedError:
         pass
     else:
         raise AssertionError("tick=True should error on non-CPython")
